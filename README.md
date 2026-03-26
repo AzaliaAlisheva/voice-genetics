@@ -20,8 +20,8 @@ A FastAPI-based REST API for audio processing and analysis using parselmouth, li
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd <project-directory>
+git clone https://github.com/AzaliaAlisheva/voice-genetics.git
+cd voice-genetics
 
 # Install dependencies
 pip install -r requirements.txt
