@@ -1,3 +1,4 @@
+import json
 import uuid
 from typing import Dict, Any
 
@@ -12,6 +13,23 @@ st.set_page_config(
     page_title="Voice Genetics",
     layout="wide",
 )
+
+
+METRIC_EXPLANATIONS = {
+    "Duration (s)": "Length of the uploaded recording in seconds.",
+    "SNR (dB)": "Signal-to-noise ratio. Higher values usually mean cleaner audio with less background noise.",
+    "Average pitch (Hz)": "Average fundamental frequency of the voice, often perceived as average pitch.",
+    "Noise level": "A simple estimated category of background noise in the recording.",
+    "Jitter (%)": "Small cycle-to-cycle changes in pitch. Higher values may indicate less stable voice production.",
+    "Shimmer (dB)": "Small cycle-to-cycle changes in loudness. Higher values may indicate less stable vocal intensity.",
+    "Voice clarity (HNR)": "Harmonic-to-noise ratio. Higher values usually suggest a clearer, more periodic voice signal.",
+    "Min F0": "Lowest detected pitch in the voiced parts of the recording.",
+    "Max F0": "Highest detected pitch in the voiced parts of the recording.",
+    "Variability": "How much the pitch changes relative to its average value.",
+    "Formants": "Resonance frequencies of the vocal tract. They help describe how speech sounds are shaped.",
+    "MFCCs": "Mel-frequency cepstral coefficients. These summarize the sound spectrum and are commonly used in speech analysis and machine learning.",
+    "Sample rate": "Number of audio samples per second used during processing.",
+}
 
 
 @st.cache_resource
@@ -48,6 +66,12 @@ def safe_round(value: Any, digits: int = 3) -> Any:
     if isinstance(value, (int, float)):
         return round(value, digits)
     return value
+
+
+def metric_with_help(title: str, value: Any, help_text: str | None = None) -> None:
+    st.metric(title, value)
+    if help_text:
+        st.caption(help_text)
 
 
 def flatten_result(result) -> Dict[str, Any]:
@@ -90,18 +114,62 @@ def display_overview(result) -> None:
     voice_quality = result.features.get("voice_quality", {})
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Duration (s)", safe_round(rq.get("duration_seconds", 0.0)))
-    c2.metric("SNR (dB)", safe_round(rq.get("snr_db", 0.0)))
-    c3.metric("Mean F0 (Hz)", safe_round(pitch.get("mean_f0_hz", 0.0)))
-    c4.metric("Noise level", rq.get("background_noise_level", "unknown"))
+    with c1:
+        metric_with_help(
+            "Duration (s)",
+            safe_round(rq.get("duration_seconds", 0.0)),
+            METRIC_EXPLANATIONS["Duration (s)"],
+        )
+    with c2:
+        metric_with_help(
+            "SNR (dB)",
+            safe_round(rq.get("snr_db", 0.0)),
+            METRIC_EXPLANATIONS["SNR (dB)"],
+        )
+    with c3:
+        metric_with_help(
+            "Average pitch (Hz)",
+            safe_round(pitch.get("mean_f0_hz", 0.0)),
+            METRIC_EXPLANATIONS["Average pitch (Hz)"],
+        )
+    with c4:
+        metric_with_help(
+            "Noise level",
+            rq.get("background_noise_level", "unknown"),
+            METRIC_EXPLANATIONS["Noise level"],
+        )
 
     c5, c6, c7 = st.columns(3)
-    c5.metric("Jitter (%)", safe_round(voice_quality.get("jitter_percent", 0.0)))
-    c6.metric("Shimmer (dB)", safe_round(voice_quality.get("shimmer_db", 0.0)))
-    c7.metric("HNR", safe_round(voice_quality.get("harmonic_to_noise_ratio", 0.0)))
+    with c5:
+        metric_with_help(
+            "Jitter (%)",
+            safe_round(voice_quality.get("jitter_percent", 0.0)),
+            METRIC_EXPLANATIONS["Jitter (%)"],
+        )
+    with c6:
+        metric_with_help(
+            "Shimmer (dB)",
+            safe_round(voice_quality.get("shimmer_db", 0.0)),
+            METRIC_EXPLANATIONS["Shimmer (dB)"],
+        )
+    with c7:
+        metric_with_help(
+            "Voice clarity (HNR)",
+            safe_round(voice_quality.get("harmonic_to_noise_ratio", 0.0)),
+            METRIC_EXPLANATIONS["Voice clarity (HNR)"],
+        )
+
+    st.info(
+        "These values describe recording quality, pitch behavior, and voice stability. "
+        "They are useful for analysis, but they are not a medical diagnosis on their own."
+    )
 
 
 def display_pitch(result) -> None:
+    st.caption(
+        "Pitch features describe how high or low the voice sounds and how much that pitch changes."
+    )
+
     pitch = result.features.get("pitch", {})
     df = pd.DataFrame(
         {
@@ -112,12 +180,22 @@ def display_pitch(result) -> None:
                 safe_round(pitch.get("max_f0_hz", 0.0)),
                 safe_round(pitch.get("variability", 0.0)),
             ],
+            "Meaning": [
+                METRIC_EXPLANATIONS["Average pitch (Hz)"],
+                METRIC_EXPLANATIONS["Min F0"],
+                METRIC_EXPLANATIONS["Max F0"],
+                METRIC_EXPLANATIONS["Variability"],
+            ],
         }
     )
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def display_formants(result) -> None:
+    st.caption(
+        "Formants are resonance frequencies of the vocal tract. They help describe how speech sounds are shaped."
+    )
+
     formants = result.features.get("timbre", {}).get("formants", {})
     if not formants:
         st.info("No formants were extracted.")
@@ -134,6 +212,10 @@ def display_formants(result) -> None:
 
 
 def display_mfccs(result) -> None:
+    st.caption(
+        "MFCCs summarize the spectral shape of the voice signal and are commonly used as machine-learning input features."
+    )
+
     mfccs = result.features.get("timbre", {}).get("mfccs", [])
     if not mfccs:
         st.info("No MFCCs were extracted.")
@@ -150,6 +232,10 @@ def display_mfccs(result) -> None:
 
 
 def display_quality(result) -> None:
+    st.caption(
+        "These metrics describe the quality of the recording itself and the stability of the produced voice signal."
+    )
+
     rq = result.recording_quality
     voice_quality = result.features.get("voice_quality", {})
 
@@ -157,6 +243,7 @@ def display_quality(result) -> None:
 
     with left:
         st.subheader("Recording quality")
+        st.write("How clean and usable the uploaded audio is.")
         st.json(
             {
                 "duration_seconds": safe_round(rq.get("duration_seconds", 0.0)),
@@ -168,6 +255,7 @@ def display_quality(result) -> None:
 
     with right:
         st.subheader("Voice quality")
+        st.write("How stable and periodic the voice signal appears to be.")
         st.json(
             {
                 "jitter_percent": safe_round(voice_quality.get("jitter_percent", 0.0)),
@@ -202,11 +290,28 @@ def show_history() -> None:
 
 
 def main() -> None:
-    st.title("🎵 Voice Genetics")
+    st.title("Voice Genetics")
     st.markdown(
         "Upload a voice recording and extract acoustic features such as pitch, formants, MFCCs, "
         "jitter, shimmer, and basic recording quality metrics."
     )
+
+    with st.expander("What do these metrics mean?"):
+        st.markdown(
+            """
+            - **Duration**: the length of the recording.
+            - **SNR**: how strong the voice signal is compared to background noise.
+            - **Average pitch (F0)**: the average perceived pitch of the voice.
+            - **Noise level**: a simple estimate of background noise.
+            - **Jitter**: small pitch instability from one cycle to the next.
+            - **Shimmer**: small loudness instability from one cycle to the next.
+            - **HNR**: ratio of harmonic voice energy to noise energy.
+            - **Formants**: resonance frequencies linked to vocal tract shape.
+            - **MFCCs**: compact features describing the sound spectrum.
+
+            These measurements help describe the voice signal, but they should not be interpreted as a diagnosis by themselves.
+            """
+        )
 
     with st.sidebar:
         st.header("Settings")
@@ -262,7 +367,8 @@ def main() -> None:
                 actual_duration = result.recording_quality.get("duration_seconds", 0.0)
                 if actual_duration < min_duration_seconds:
                     st.warning(
-                        f"Audio is too short. Minimum duration is {min_duration_seconds}s, but the uploaded file is {safe_round(actual_duration)}s."
+                        f"Audio is too short. Minimum duration is {min_duration_seconds}s, "
+                        f"but the uploaded file is {safe_round(actual_duration)}s."
                     )
                 else:
                     st.success("Feature extraction completed successfully.")
@@ -306,7 +412,7 @@ def main() -> None:
                 }
                 st.download_button(
                     label="Download result as JSON",
-                    data=pd.Series(json_payload).to_json(indent=2),
+                    data=json.dumps(json_payload, indent=2),
                     file_name=f"voice_features_{result.session_id}.json",
                     mime="application/json",
                 )
@@ -320,8 +426,7 @@ def main() -> None:
     with st.expander("How to run this app"):
         st.code(
             "pip install -r requirements.txt\n"
-            "pip install streamlit\n"
-            "streamlit run streamlit_app.py",
+            "python -m streamlit run streamlit_app.py",
             language="bash",
         )
 
