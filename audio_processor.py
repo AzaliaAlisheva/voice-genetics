@@ -168,30 +168,35 @@ class VoiceFeatureExtractor:
             return [0.0] * self.config.mfcc_number
     
     def extract_voice_quality(self, sound: parselmouth.Sound) -> VoiceQuality:
-        """Extract voice quality features using Parselmouth"""
         try:
-            # Extract point process for jitter/shimmer
-            pitch = sound.to_pitch()
-            point_process = parselmouth.praat.call(pitch, "To PointProcess")
-            
-            # Jitter (local)
-            jitter = parselmouth.praat.call(point_process, "Get jitter (local)", 0.0001, 0.02, 1.3)
-            
-            # Shimmer (local)
-            shimmer = parselmouth.praat.call([sound, point_process], "Get shimmer (local)", 0.0001, 0.02, 1.3, 1.6)
-            
-            # Harmonic-to-Noise Ratio
-            hnr = parselmouth.praat.call(sound, "Get harmonicity", 0.0, 0.0, 75, 500, 1, 1.5)
-            
-            return VoiceQuality(
-                jitter_percent=float(jitter * 100) if not np.isnan(jitter) else 0.0,
-                shimmer_db=float(shimmer) if not np.isnan(shimmer) else 0.0,
-                harmonic_to_noise_ratio=float(hnr) if not np.isnan(hnr) else 0.0
+            point_process = parselmouth.praat.call(
+                sound, "To PointProcess (periodic, cc)",
+                self.config.pitch_min_f0,
+                self.config.pitch_max_f0
             )
+
+            jitter = parselmouth.praat.call(
+                point_process, "Get jitter (local)",
+                0, 0, 0.0001, 0.02, 1.3
+            )
+
+            shimmer = parselmouth.praat.call(
+                [sound, point_process], "Get shimmer (local)",
+                0, 0, 0.0001, 0.02, 1.3, 1.6
+            )
+
+            harmonicity = sound.to_harmonicity_cc()
+            hnr = parselmouth.praat.call(harmonicity, "Get mean", 0, 0)
+
+            return VoiceQuality(
+                jitter_percent=float(jitter * 100) if jitter and not np.isnan(jitter) else None,
+                shimmer_db=float(shimmer) if shimmer and not np.isnan(shimmer) else None,
+                harmonic_to_noise_ratio=float(hnr) if hnr and not np.isnan(hnr) else None
+            )
+
         except Exception as e:
             print(f"Error extracting voice quality: {e}")
-            return VoiceQuality(jitter_percent=0.0, shimmer_db=0.0)
-    
+            return VoiceQuality(jitter_percent=None, shimmer_db=None, harmonic_to_noise_ratio=None)
     def extract_features(self, audio_data: bytes, session_id: str) -> FeatureExtractionResult:
         """Main method to extract all features"""
         import datetime
