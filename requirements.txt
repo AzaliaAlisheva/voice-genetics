@@ -6,3 +6,5 @@ python-multipart==0.0.6
 librosa==0.10.1
 scipy==1.11.4
 pydantic==2.5.0
+setuptools<82
+streamlit
