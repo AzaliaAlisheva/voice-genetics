@@ -189,10 +189,12 @@ class VoiceFeatureExtractor:
             hnr = parselmouth.praat.call(harmonicity, "Get mean", 0, 0)
 
             return VoiceQuality(
-                jitter_percent=float(jitter * 100) if jitter and not np.isnan(jitter) else None,
-                shimmer_db=float(shimmer) if shimmer and not np.isnan(shimmer) else None,
-                harmonic_to_noise_ratio=float(hnr) if hnr and not np.isnan(hnr) else None
-            )
+                jitter_percent=float(jitter * 100) if jitter is not None and not np.isnan(jitter) else None,
+                shimmer_db=float(shimmer) if shimmer is not None and not np.isnan(shimmer) else None,
+                harmonic_to_noise_ratio=float(hnr) if hnr is not None and not np.isnan(hnr) else None
+                )
+                
+            
 
         except Exception as e:
             print(f"Error extracting voice quality: {e}")
