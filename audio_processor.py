@@ -1,11 +1,10 @@
 import parselmouth
 import numpy as np
 import librosa
-import io
 import tempfile
 import os
+from pathlib import Path
 from typing import Dict, Any, Optional
-import scipy.signal as signal
 from dataclasses import dataclass, asdict
 import warnings
 warnings.filterwarnings('ignore')
@@ -31,8 +30,8 @@ class TimbreFeatures:
 
 @dataclass
 class VoiceQuality:
-    jitter_percent: float
-    shimmer_db: float
+    jitter_percent: Optional[float]
+    shimmer_db: Optional[float]
     harmonic_to_noise_ratio: Optional[float] = None
 
 @dataclass
@@ -41,6 +40,12 @@ class FeatureExtractionResult:
     recording_quality: Dict[str, Any]
     features: Dict[str, Any]
     processing_timestamp: str
+    segment_id: Optional[str] = None
+    role: Optional[str] = None
+    speaker_id: Optional[str] = None
+    start_sec: Optional[float] = None
+    end_sec: Optional[float] = None
+    source_filename: Optional[str] = None
 
 class VoiceFeatureExtractor:
     def __init__(self, config=None):
@@ -50,26 +55,46 @@ class VoiceFeatureExtractor:
             self.config = DEFAULT_CONFIG
     
     def load_audio(self, audio_data: bytes, original_filename: str = None) -> tuple:
-        """Load audio from bytes and resample if needed"""
+        """Load audio from bytes and resample if needed."""
         try:
-            # Save to temporary file for Parselmouth
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+            suffix = ".wav"
+            if original_filename:
+                detected_suffix = Path(original_filename).suffix.lower()
+                if detected_suffix:
+                    suffix = detected_suffix
+
+            tmp_path = None
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
                 tmp_file.write(audio_data)
                 tmp_path = tmp_file.name
-            
-            # Load with librosa for initial processing
-            y, sr = librosa.load(tmp_path, sr=self.config.target_sample_rate)
-            
-            # Also load with Parselmouth for advanced analysis
-            sound = parselmouth.Sound(tmp_path)
-            
-            # Clean up temp file
-            os.unlink(tmp_path)
-            
+
+            # Load with librosa for resampling and feature extraction.
+            y, sr = librosa.load(tmp_path, sr=self.config.target_sample_rate, mono=True)
+
+            # Build Parselmouth sound from the decoded waveform so mp3/m4a inputs
+            # work as long as librosa can decode them.
+            sound = parselmouth.Sound(y, sr)
+
             return y, sr, sound
             
         except Exception as e:
             raise Exception(f"Error loading audio: {str(e)}")
+        finally:
+            if 'tmp_path' in locals() and tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    def slice_waveform(self, y: np.ndarray, sr: int, start_sec: float, end_sec: float) -> np.ndarray:
+        """Return a time-bounded slice of the waveform."""
+        if start_sec < 0:
+            start_sec = 0.0
+        if end_sec <= start_sec:
+            raise ValueError("Segment end time must be greater than start time")
+
+        start_sample = max(0, int(round(start_sec * sr)))
+        end_sample = min(len(y), int(round(end_sec * sr)))
+        if end_sample <= start_sample:
+            raise ValueError("Segment bounds produce an empty slice")
+        return y[start_sample:end_sample]
     
     def estimate_snr(self, y: np.ndarray, sr: int) -> float:
         """Estimate Signal-to-Noise Ratio"""
@@ -199,31 +224,46 @@ class VoiceFeatureExtractor:
         except Exception as e:
             print(f"Error extracting voice quality: {e}")
             return VoiceQuality(jitter_percent=None, shimmer_db=None, harmonic_to_noise_ratio=None)
-    def extract_features(self, audio_data: bytes, session_id: str) -> FeatureExtractionResult:
-        """Main method to extract all features"""
+
+    def extract_waveform_features(
+        self,
+        y: np.ndarray,
+        sr: int,
+        session_id: str,
+        *,
+        sound: Optional[parselmouth.Sound] = None,
+        segment_id: Optional[str] = None,
+        role: Optional[str] = None,
+        speaker_id: Optional[str] = None,
+        start_sec: Optional[float] = None,
+        end_sec: Optional[float] = None,
+        source_filename: Optional[str] = None,
+    ) -> FeatureExtractionResult:
+        """Extract all features from an in-memory waveform."""
         import datetime
-        
-        # Load audio
-        y, sr, sound = self.load_audio(audio_data)
-        duration = len(y) / sr
-        
+
+        if sound is None:
+            sound = parselmouth.Sound(y, sr)
+
+        duration = len(y) / sr if sr else 0.0
+
         # Quality metrics
         snr = self.estimate_snr(y, sr)
         noise_level = self.assess_noise_level(snr)
-        
+
         recording_quality = RecordingQuality(
             duration_seconds=duration,
             snr_db=snr,
             background_noise_level=noise_level,
             sample_rate=sr
         )
-        
+
         # Feature extraction
         pitch_features = self.extract_pitch_features(sound)
         formants = self.extract_formants(sound)
         mfccs = self.extract_mfccs(y, sr)
         voice_quality = self.extract_voice_quality(sound)
-        
+
         # Compile features
         features = {
             "pitch": asdict(pitch_features),
@@ -233,10 +273,27 @@ class VoiceFeatureExtractor:
             },
             "voice_quality": asdict(voice_quality)
         }
-        
+
         return FeatureExtractionResult(
             session_id=session_id,
             recording_quality=asdict(recording_quality),
             features=features,
-            processing_timestamp=datetime.datetime.utcnow().isoformat() + "Z"
+            processing_timestamp=datetime.datetime.utcnow().isoformat() + "Z",
+            segment_id=segment_id,
+            role=role,
+            speaker_id=speaker_id,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            source_filename=source_filename,
+        )
+
+    def extract_features(self, audio_data: bytes, session_id: str, original_filename: str = None) -> FeatureExtractionResult:
+        """Main method to extract all features from raw audio bytes."""
+        y, sr, sound = self.load_audio(audio_data, original_filename=original_filename)
+        return self.extract_waveform_features(
+            y,
+            sr,
+            session_id,
+            sound=sound,
+            source_filename=original_filename,
         )

@@ -1,2 +1,18 @@
+# Local development environments
+.venv/
+venv/
 /venv
-/__pycache__
+
+# Python cache and bytecode
+__pycache__/
+*.pyc
+
+# Local datasets and generated artifacts
+data/
+storage/
+outputs/
+artifacts/
+reports/
+
+# Misc
+.history/

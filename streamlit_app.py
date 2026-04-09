@@ -1,12 +1,13 @@
 import json
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import pandas as pd
 import streamlit as st
 
 from audio_processor import VoiceFeatureExtractor
 from config import ExtractionConfig, DEFAULT_CONFIG
+from dialogue_processor import DialogueProcessor, DialogueSegmentSpec
 
 
 st.set_page_config(
@@ -45,6 +46,9 @@ def make_config(
     mfcc_number: int,
     min_duration_seconds: float,
     target_sample_rate: int,
+    vad_top_db: float = 28.0,
+    min_turn_duration_seconds: float = 0.35,
+    merge_gap_seconds: float = 0.25,
 ) -> ExtractionConfig:
     return ExtractionConfig(
         pitch_min_f0=pitch_min_f0,
@@ -59,6 +63,9 @@ def make_config(
         min_snr_db=20.0,
         min_duration_seconds=min_duration_seconds,
         target_sample_rate=target_sample_rate,
+        vad_top_db=vad_top_db,
+        min_turn_duration_seconds=min_turn_duration_seconds,
+        merge_gap_seconds=merge_gap_seconds,
     )
 
 
@@ -289,30 +296,73 @@ def show_history() -> None:
     )
 
 
-def main() -> None:
-    st.title("Voice Genetics")
-    st.markdown(
-        "Upload a voice recording and extract acoustic features such as pitch, formants, MFCCs, "
-        "jitter, shimmer, and basic recording quality metrics."
-    )
+def make_dialogue_turn_dataframe(result, source_filename: str) -> pd.DataFrame:
+    processor = DialogueProcessor(VoiceFeatureExtractor(DEFAULT_CONFIG.model_copy(deep=True)))
+    rows = processor.turns_to_manifest_rows(result.turns, source_filename=source_filename)
+    df = pd.DataFrame(rows)
+    return df[
+        [
+            "filename",
+            "segment_id",
+            "start_sec",
+            "end_sec",
+            "analysis_start_sec",
+            "analysis_end_sec",
+            "role",
+            "speaker_id",
+            "speaker_cluster",
+            "turn_type",
+            "is_barge_in",
+            "gap_before_seconds",
+            "gap_after_seconds",
+            "text",
+            "source",
+        ]
+    ]
 
-    with st.expander("What do these metrics mean?"):
-        st.markdown(
-            """
-            - **Duration**: the length of the recording.
-            - **SNR**: how strong the voice signal is compared to background noise.
-            - **Average pitch (F0)**: the average perceived pitch of the voice.
-            - **Noise level**: a simple estimate of background noise.
-            - **Jitter**: small pitch instability from one cycle to the next.
-            - **Shimmer**: small loudness instability from one cycle to the next.
-            - **HNR**: ratio of harmonic voice energy to noise energy.
-            - **Formants**: resonance frequencies linked to vocal tract shape.
-            - **MFCCs**: compact features describing the sound spectrum.
 
-            These measurements help describe the voice signal, but they should not be interpreted as a diagnosis by themselves.
-            """
+def build_segments_from_manifest(df: pd.DataFrame) -> List[DialogueSegmentSpec]:
+    segments: List[DialogueSegmentSpec] = []
+    for _, row in df.iterrows():
+        role = row.get("role", "")
+        if pd.isna(role):
+            role = ""
+        speaker_id = row.get("speaker_id", "")
+        if pd.isna(speaker_id):
+            speaker_id = ""
+        text = row.get("text", "")
+        if pd.isna(text):
+            text = ""
+        is_barge_in_value = row.get("is_barge_in")
+        if pd.isna(is_barge_in_value):
+            is_barge_in = None
+        else:
+            is_barge_in = str(is_barge_in_value).strip().lower() in {"1", "true", "yes", "y"}
+        segments.append(
+            DialogueSegmentSpec(
+                segment_id=str(row.get("segment_id") or ""),
+                start_sec=float(row.get("start_sec")),
+                end_sec=float(row.get("end_sec")),
+                analysis_start_sec=float(row.get("analysis_start_sec")) if pd.notna(row.get("analysis_start_sec")) else None,
+                analysis_end_sec=float(row.get("analysis_end_sec")) if pd.notna(row.get("analysis_end_sec")) else None,
+                role=str(role).strip() or None,
+                speaker_id=str(speaker_id).strip() or None,
+                text=str(text).strip() or None,
+                turn_type=str(row.get("turn_type")).strip() if pd.notna(row.get("turn_type")) else None,
+                is_barge_in=is_barge_in,
+                source=str(row.get("source") or "manifest"),
+            )
         )
+    return segments
 
+
+def dialogue_role_options(max_assistants: int = 20) -> List[str]:
+    roles = ["assistant_1", "user", "music"]
+    roles.extend(f"assistant_{index}" for index in range(2, max_assistants + 1))
+    return roles
+
+
+def render_single_recording_tab() -> None:
     with st.sidebar:
         st.header("Settings")
         pitch_min_f0 = st.number_input("Min pitch (Hz)", min_value=50.0, max_value=500.0, value=75.0, step=1.0)
@@ -330,12 +380,12 @@ def main() -> None:
         st.markdown("---")
         st.caption("Supported formats: WAV, MP3, M4A")
 
-    uploaded_file = st.file_uploader("Upload audio file", type=["wav", "mp3", "m4a"])
+    uploaded_file = st.file_uploader("Upload audio file", type=["wav", "mp3", "m4a"], key="single_upload")
 
     if uploaded_file is not None:
         st.audio(uploaded_file)
 
-    analyze = st.button("Analyze voice", type="primary", use_container_width=True)
+    analyze = st.button("Analyze voice", type="primary", use_container_width=True, key="single_analyze")
 
     if analyze:
         if uploaded_file is None:
@@ -357,12 +407,11 @@ def main() -> None:
                     target_sample_rate=target_sample_rate,
                 )
 
-                extractor = get_extractor()
-                extractor.config = config
+                extractor = VoiceFeatureExtractor(config)
 
                 session_id = str(uuid.uuid4())
                 with st.spinner("Processing audio and extracting features..."):
-                    result = extractor.extract_features(audio_bytes, session_id)
+                    result = extractor.extract_features(audio_bytes, session_id, original_filename=uploaded_file.name)
 
                 actual_duration = result.recording_quality.get("duration_seconds", 0.0)
                 if actual_duration < min_duration_seconds:
@@ -419,6 +468,234 @@ def main() -> None:
 
             except Exception as e:
                 st.error(f"Feature extraction failed: {e}")
+
+
+def render_dialogue_tab() -> None:
+    st.subheader("Conversation analysis")
+    st.caption(
+        "Use this flow for phone conversations. The first step is diarization; "
+        "roles are assigned by matching each turn against stable voice profiles. "
+        "assistant_1 is seeded from the first assistant voice, user from the first user voice, and new assistant voices become assistant_2, assistant_3, and so on. "
+        "Hold music is marked as music only when the segment is strongly music-like. Barge-in turns can be trimmed before feature extraction."
+    )
+
+    with st.sidebar:
+        st.header("Dialogue settings")
+        dialogue_vad_top_db = st.slider("VAD threshold (top_db)", min_value=10.0, max_value=60.0, value=28.0, step=1.0)
+        dialogue_min_turn = st.number_input("Min turn duration (s)", min_value=0.1, max_value=5.0, value=0.35, step=0.05)
+        dialogue_merge_gap = st.number_input("Merge gap (s)", min_value=0.0, max_value=2.0, value=0.25, step=0.05)
+        dialogue_target_sample_rate = st.selectbox(
+            "Target sample rate (dialogue)", options=[8000, 16000, 22050, 44100], index=1, key="dialogue_sr"
+        )
+        st.markdown("---")
+        st.caption("The manifest you download can be edited before user-only analysis.")
+
+    uploaded_file = st.file_uploader(
+        "Upload conversation audio",
+        type=["wav", "mp3", "m4a"],
+        key="dialogue_upload",
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        diarize_clicked = st.button("Run diarization", type="primary", use_container_width=True, key="dialogue_diarize")
+    with col_b:
+        clear_clicked = st.button("Clear dialogue state", use_container_width=True, key="dialogue_clear")
+
+    if clear_clicked:
+        st.session_state.pop("dialogue_diarization", None)
+        st.session_state.pop("dialogue_manifest_df", None)
+        st.session_state.pop("dialogue_analysis", None)
+        st.rerun()
+
+    if diarize_clicked:
+        if uploaded_file is None:
+            st.error("Please upload a conversation audio file first.")
+        else:
+            try:
+                audio_bytes = uploaded_file.read()
+                if len(audio_bytes) > 50 * 1024 * 1024:
+                    st.error("File too large. Maximum size is 50MB.")
+                    st.stop()
+
+                config = make_config(
+                    pitch_min_f0=75.0,
+                    pitch_max_f0=300.0,
+                    formant_max_frequency=5500.0,
+                    formant_number=4,
+                    mfcc_number=13,
+                    min_duration_seconds=0.5,
+                    target_sample_rate=dialogue_target_sample_rate,
+                    vad_top_db=dialogue_vad_top_db,
+                    min_turn_duration_seconds=dialogue_min_turn,
+                    merge_gap_seconds=dialogue_merge_gap,
+                )
+                processor = DialogueProcessor(VoiceFeatureExtractor(config))
+                session_id = str(uuid.uuid4())
+                with st.spinner("Running diarization on the conversation..."):
+                    result = processor.diarize_dialogue(audio_bytes, session_id, original_filename=uploaded_file.name)
+
+                st.session_state.dialogue_diarization = {
+                    "source_filename": uploaded_file.name,
+                    "result": result,
+                    "audio_bytes": audio_bytes,
+                    "config": config,
+                }
+                st.session_state.dialogue_manifest_df = make_dialogue_turn_dataframe(result, uploaded_file.name)
+                st.session_state.pop("dialogue_analysis", None)
+                st.success("Diarization completed.")
+            except Exception as e:
+                st.error(f"Diarization failed: {e}")
+
+    state = st.session_state.get("dialogue_diarization")
+    if not state:
+        st.info("Upload a conversation and run diarization to generate a dialogue manifest.")
+        return
+
+    result = state["result"]
+    source_filename = state["source_filename"]
+
+    st.subheader("Diarization output")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Speech turns", result.diarization.get("speech_turn_count", 0))
+    with c2:
+        st.metric("Speaker clusters", result.diarization.get("speaker_cluster_count", 0))
+    with c3:
+        st.metric("Source file", source_filename)
+
+    st.caption(
+        "Role labels are semantic: the first turn seeds assistant_1, the first user turn seeds user, later distinct assistant voices become assistant_2, assistant_3, and so on, and hold music is marked as music. "
+        "speaker_id is a stable canonical voice label like speaker_1, while speaker_cluster is the technical diarization cluster."
+    )
+    st.dataframe(pd.DataFrame(result.turns), use_container_width=True, hide_index=True)
+
+    st.subheader("Generate dialogue_manifest.csv")
+    manifest_df = st.data_editor(
+        st.session_state.dialogue_manifest_df,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "role": st.column_config.SelectboxColumn(
+                "role",
+                options=dialogue_role_options(),
+                required=True,
+            ),
+            "speaker_id": st.column_config.TextColumn("speaker_id"),
+            "text": st.column_config.TextColumn("text"),
+        },
+        disabled=[
+            "filename",
+            "segment_id",
+            "start_sec",
+            "end_sec",
+            "analysis_start_sec",
+            "analysis_end_sec",
+            "speaker_cluster",
+            "turn_type",
+            "is_barge_in",
+            "gap_before_seconds",
+            "gap_after_seconds",
+            "source",
+        ],
+        key="dialogue_manifest_editor",
+    )
+    st.session_state.dialogue_manifest_df = manifest_df
+
+    manifest_csv = manifest_df.to_csv(index=False)
+    st.download_button(
+        label="Download dialogue_manifest.csv",
+        data=manifest_csv,
+        file_name="dialogue_manifest.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("Role-aware analysis")
+    st.caption("The analysis below uses only rows labeled as role=user.")
+
+    analyze_labeled = st.button(
+        "Analyze labeled dialogue",
+        type="primary",
+        use_container_width=True,
+        key="dialogue_analyze_labeled",
+    )
+
+    if analyze_labeled:
+        try:
+            segments = build_segments_from_manifest(manifest_df)
+            processor = DialogueProcessor(VoiceFeatureExtractor(state["config"]))
+            analysis = processor.analyze_labeled_dialogue(
+                state["audio_bytes"],
+                str(uuid.uuid4()),
+                segments,
+                original_filename=source_filename,
+                strict_roles=True,
+            )
+            st.session_state.dialogue_analysis = analysis
+            st.success("Role-aware analysis completed.")
+        except Exception as e:
+            st.error(f"Role-aware analysis failed: {e}")
+
+    analysis = st.session_state.get("dialogue_analysis")
+    if analysis:
+        st.metric("User turns", analysis.diarization.get("user_turn_count", 0))
+        user_summary_df = pd.DataFrame(
+            [
+                {"feature": key, "value": value}
+                for key, value in analysis.user_summary["feature_map"].items()
+            ]
+        )
+        st.dataframe(user_summary_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            label="Download user feature summary as JSON",
+            data=json.dumps(
+                {
+                    "session_id": analysis.session_id,
+                    "source_filename": analysis.source_filename,
+                    "recording_quality": analysis.recording_quality,
+                    "diarization": analysis.diarization,
+                    "speaker_summary": analysis.speaker_summary,
+                    "user_summary": analysis.user_summary,
+                    "turns": analysis.turns,
+                    "processing_timestamp": analysis.processing_timestamp,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file_name="dialogue_user_features.json",
+            mime="application/json",
+        )
+
+
+def main() -> None:
+    st.title("Voice Genetics")
+    st.markdown(
+        "Analyze either a single voice recording or a conversation. "
+        "The dialogue flow generates a `dialogue_manifest.csv` and extracts user-only features."
+    )
+
+    with st.expander("What do these metrics mean?"):
+        st.markdown(
+            """
+            - **Duration**: the length of the recording.
+            - **SNR**: how strong the voice signal is compared to background noise.
+            - **Average pitch (F0)**: the average perceived pitch of the voice.
+            - **Noise level**: a simple estimate of background noise.
+            - **Jitter**: small pitch instability from one cycle to the next.
+            - **Shimmer**: small loudness instability from one cycle to the next.
+            - **HNR**: ratio of harmonic voice energy to noise energy.
+            - **Formants**: resonance frequencies linked to vocal tract shape.
+            - **MFCCs**: compact features describing the sound spectrum.
+
+            These measurements help describe the voice signal, but they should not be interpreted as a diagnosis by themselves.
+            """
+        )
+
+    single_tab, dialogue_tab = st.tabs(["Single recording", "Conversation recording"])
+    with single_tab:
+        render_single_recording_tab()
+    with dialogue_tab:
+        render_dialogue_tab()
 
     st.markdown("---")
     show_history()

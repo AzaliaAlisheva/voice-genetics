@@ -27,7 +27,22 @@ class ExtractionConfig(BaseModel):
     
     # Processing parameters
     target_sample_rate: Optional[int] = 16000
-    
+
+    # Dialogue / diarization parameters
+    vad_top_db: Optional[float] = 28.0
+    min_turn_duration_seconds: Optional[float] = 0.35
+    merge_gap_seconds: Optional[float] = 0.25
+    max_dialogue_speakers: Optional[int] = 8
+    min_speech_energy_threshold: Optional[float] = 0.0
+    barge_in_gap_seconds: Optional[float] = 0.35
+    barge_in_trim_seconds: Optional[float] = 0.25
+    music_min_duration_seconds: Optional[float] = 6.0
+    music_min_gap_seconds: Optional[float] = 0.75
+    music_min_score: Optional[int] = 4
+    speaker_role_similarity_threshold: Optional[float] = 0.78
+    music_role_similarity_threshold: Optional[float] = 0.62
+    dialogue_cluster_distance_threshold: Optional[float] = 0.04
+
     class Config:
         arbitrary_types_allowed = True
 
