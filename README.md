@@ -11,7 +11,7 @@ The project is being extended toward **conversation-level voice phenotyping** fo
 
 ## Demo
 
-![Voice Genetics Demo](VoiceGen/voice-genetics/demo.gif)
+![Voice Genetics Demo](voice-genetics/demo.gif)
 
 ---
 
