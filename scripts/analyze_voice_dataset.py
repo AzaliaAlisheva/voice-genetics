@@ -20,16 +20,19 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Ensure project root imports work when this script is executed directly.
+# This allows the script to be run from anywhere while correctly resolving imports.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
 
 LOGGER = logging.getLogger("voice_dataset_analyzer")
 SUPPORTED_SUFFIXES = {".wav", ".mp3", ".m4a"}
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Build command-line argument parser for the batch dataset analysis tool.
+    """
     parser = argparse.ArgumentParser(
         description="Extract voice features from a directory of recordings."
     )
@@ -37,13 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-dir",
         type=Path,
         default=Path("data"),
-        help="Directory with audio files.",
+        help="Directory containing audio files to analyze.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("outputs"),
-        help="Directory where results will be written.",
+        help="Directory where results (CSV and JSON) will be saved.",
     )
     parser.add_argument(
         "--manifest",
@@ -56,31 +59,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--speaker-type",
         choices=["user", "assistant", "all"],
         default="user",
-        help="Which speaker type to analyze. Requires a manifest unless set to all.",
+        help="Which speaker type to analyze. Requires a manifest unless set to 'all'.",
     )
     parser.add_argument(
         "--min-duration",
         type=float,
         default=0.5,
-        help="Minimum accepted duration in seconds.",
+        help="Minimum accepted duration in seconds. Shorter files are skipped.",
     )
     parser.add_argument(
         "--pitch-min-f0",
         type=float,
         default=75.0,
-        help="Minimum pitch floor in Hz.",
+        help="Minimum pitch floor in Hz (for voice pitch detection).",
     )
     parser.add_argument(
         "--pitch-max-f0",
         type=float,
         default=300.0,
-        help="Maximum pitch ceiling in Hz.",
+        help="Maximum pitch ceiling in Hz (for voice pitch detection).",
     )
     parser.add_argument(
         "--formant-number",
         type=int,
         default=4,
-        help="Number of formants to extract.",
+        help="Number of formants to extract (F1, F2, F3, F4).",
     )
     parser.add_argument(
         "--mfcc-number",
@@ -92,18 +95,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-sample-rate",
         type=int,
         default=16000,
-        help="Target sample rate for processing.",
+        help="Target sample rate for processing (resampling if needed).",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Optional cap on number of files to process.",
+        help="Optional cap on number of files to process (useful for testing).",
     )
     return parser
 
 
 def load_manifest(manifest_path: Path) -> Dict[str, Dict[str, str]]:
+    """
+    Load and parse the CSV manifest file.
+
+    The manifest maps filenames to speaker_type labels and optional metadata.
+    This allows filtering by speaker type (user vs assistant).
+    """
     if not manifest_path.exists():
         raise FileNotFoundError(f"Manifest not found: {manifest_path}")
 
@@ -132,6 +141,12 @@ def load_manifest(manifest_path: Path) -> Dict[str, Dict[str, str]]:
 
 
 def make_config(args: argparse.Namespace, base_config: Any) -> Any:
+    """
+    Create a custom configuration from command-line arguments.
+
+    This allows overriding default extraction parameters without
+    modifying the global configuration file.
+    """
     config = base_config.model_copy(deep=True)
     config.min_duration_seconds = args.min_duration
     config.pitch_min_f0 = args.pitch_min_f0
@@ -143,12 +158,18 @@ def make_config(args: argparse.Namespace, base_config: Any) -> Any:
 
 
 def flatten_result(
-    result: Any,
-    source_path: Path,
-    speaker_type: str,
-    label_source: str,
-    label_notes: str = "",
+        result: Any,
+        source_path: Path,
+        speaker_type: str,
+        label_source: str,
+        label_notes: str = "",
 ) -> Dict[str, Any]:
+    """
+    Convert a FeatureExtractionResult into a flat dictionary for CSV export.
+
+    This flattens nested structures (recording_quality, pitch, voice_quality,
+    formants, MFCCs) into a single row of scalar values.
+    """
     payload = {
         "session_id": result.session_id,
         "source_file": source_path.name,
@@ -159,6 +180,7 @@ def flatten_result(
         "processing_timestamp": result.processing_timestamp,
     }
 
+    # Recording quality metrics
     rq = result.recording_quality
     payload.update(
         {
@@ -169,6 +191,7 @@ def flatten_result(
         }
     )
 
+    # Pitch features
     pitch = result.features.get("pitch", {})
     payload.update(
         {
@@ -179,6 +202,7 @@ def flatten_result(
         }
     )
 
+    # Voice quality features (jitter, shimmer, HNR)
     voice_quality = result.features.get("voice_quality", {})
     payload.update(
         {
@@ -188,10 +212,12 @@ def flatten_result(
         }
     )
 
+    # Formants (F1, F2, F3, F4, ...)
     formants = result.features.get("timbre", {}).get("formants", {})
     for key, value in formants.items():
         payload[key] = value
 
+    # MFCC coefficients
     mfccs = result.features.get("timbre", {}).get("mfccs", [])
     for idx, value in enumerate(mfccs, start=1):
         payload[f"mfcc_{idx}"] = value
@@ -200,6 +226,7 @@ def flatten_result(
 
 
 def pick_files(input_dir: Path, limit: Optional[int]) -> list[Path]:
+    """Scan input directory and return list of supported audio files."""
     files = sorted(
         path for path in input_dir.iterdir()
         if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
@@ -210,9 +237,25 @@ def pick_files(input_dir: Path, limit: Optional[int]) -> list[Path]:
 
 
 def main() -> int:
+    """
+    Main entry point for batch voice dataset analysis.
+
+    Workflow:
+    1. Parse command-line arguments
+    2. Load manifest (if provided) for speaker type filtering
+    3. Configure feature extractor with custom parameters
+    4. Iterate through audio files in input directory
+    5. Extract features for each file (filtering by speaker type if manifest used)
+    6. Write aggregated results to CSV and detailed JSON
+    7. Report processing statistics (success, failures, skipped)
+
+    Returns:
+        0 on success, 1 on error.
+    """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = build_parser().parse_args()
 
+    # Try to import project modules (will fail if dependencies not installed)
     try:
         from audio_processor import VoiceFeatureExtractor
         from config import DEFAULT_CONFIG
@@ -224,10 +267,12 @@ def main() -> int:
         )
         return 1
 
+    # Validate input directory exists
     if not args.input_dir.exists():
         LOGGER.error("Input directory does not exist: %s", args.input_dir)
         return 1
 
+    # Validate manifest requirement
     if args.speaker_type != "all" and args.manifest is None:
         LOGGER.error(
             "speaker-type=%s requires a manifest with filename,speaker_type. "
@@ -236,29 +281,37 @@ def main() -> int:
         )
         return 1
 
+    # Load manifest if provided
     manifest = load_manifest(args.manifest) if args.manifest else {}
+
+    # Create custom configuration from command-line arguments
     config = make_config(args, DEFAULT_CONFIG)
     extractor = VoiceFeatureExtractor(config)
 
+    # Create output directory and prepare output files
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    run_id = uuid.uuid4().hex[:8]
+    run_id = uuid.uuid4().hex[:8]  # Unique identifier for this batch run
     csv_path = args.output_dir / f"voice_features_{run_id}.csv"
     json_path = args.output_dir / f"voice_features_{run_id}.json"
 
-    processed_rows = []
-    skipped_missing_label = 0
-    failed_rows = []
+    processed_rows = []  # Successful extractions
+    skipped_missing_label = 0  # Files without manifest label when filtering enabled
+    failed_rows = []  # Files that raised exceptions
 
+    # Scan input directory for audio files
     files = pick_files(args.input_dir, args.limit)
     LOGGER.info("Found %d candidate audio files", len(files))
 
+    # Process each file
     for file_path in files:
+        # Get label from manifest (if available)
         label = manifest.get(file_path.name)
         speaker_type = (label or {}).get("speaker_type", "unknown")
         label_source = "manifest" if label else "unlabeled"
         label_notes = (label or {}).get("notes", "")
         session_id = (label or {}).get("session_id") or str(uuid.uuid4())
 
+        # Filter by speaker type if requested
         if args.speaker_type != "all":
             if not label:
                 skipped_missing_label += 1
@@ -267,6 +320,7 @@ def main() -> int:
                 continue
 
         try:
+            # Read audio file and extract features
             audio_data = file_path.read_bytes()
             result = extractor.extract_features(
                 audio_data,
@@ -274,10 +328,12 @@ def main() -> int:
                 original_filename=file_path.name,
             )
 
+            # Skip files shorter than minimum duration
             if result.recording_quality.get("duration_seconds", 0.0) < args.min_duration:
                 LOGGER.warning("Skipping short file: %s", file_path.name)
                 continue
 
+            # Flatten result and add to output
             processed_rows.append(
                 flatten_result(
                     result,
@@ -288,10 +344,12 @@ def main() -> int:
                 )
             )
             LOGGER.info("Processed %s", file_path.name)
+
         except Exception as exc:  # noqa: BLE001
             failed_rows.append({"file": file_path.name, "error": str(exc)})
             LOGGER.exception("Failed to process %s", file_path.name)
 
+    # Validate that we processed at least one file
     if not processed_rows:
         LOGGER.error("No files were processed successfully.")
         if skipped_missing_label:
@@ -301,12 +359,14 @@ def main() -> int:
             )
         return 1
 
+    # Write CSV with flattened features
     fieldnames = sorted({key for row in processed_rows for key in row.keys()})
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(processed_rows)
 
+    # Write detailed JSON with summary and full results
     summary = {
         "input_dir": str(args.input_dir),
         "manifest": str(args.manifest) if args.manifest else None,
@@ -318,8 +378,12 @@ def main() -> int:
         "rows": processed_rows,
         "failures": failed_rows,
     }
-    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
+    # Log final statistics
     LOGGER.info("Saved CSV: %s", csv_path)
     LOGGER.info("Saved JSON: %s", json_path)
     LOGGER.info("Processed %d files successfully", len(processed_rows))

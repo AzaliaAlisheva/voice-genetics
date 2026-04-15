@@ -297,3 +297,22 @@ class VoiceFeatureExtractor:
             sound=sound,
             source_filename=original_filename,
         )
+
+    def get_genetic_features(self, y: np.ndarray, sr: int, sound: parselmouth.Sound = None) -> dict:
+        """Fetch features for genetic model"""
+        if sound is None:
+            sound = parselmouth.Sound(y, sr)
+
+        # Pitch features
+        pitch = self.extract_pitch_features(sound)
+
+        # Voice quality
+        voice_quality = self.extract_voice_quality(sound)
+
+        return {
+            'pitch_mean': pitch.mean_f0_hz,
+            'pitch_variability': pitch.variability,
+            'jitter': voice_quality.jitter_percent or 0,
+            'shimmer': voice_quality.shimmer_db or 0,
+            'hnr': voice_quality.harmonic_to_noise_ratio or 0,
+        }

@@ -11,3 +11,4 @@ pandas==2.1.4
 soundfile==0.12.1
 scikit-learn==1.4.2
 streamlit
+joblib

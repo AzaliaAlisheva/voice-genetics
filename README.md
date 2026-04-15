@@ -9,6 +9,12 @@ The project is being extended toward **conversation-level voice phenotyping** fo
 
 ---
 
+## Demo
+
+![Voice Genetics Demo](VoiceGen/voice-genetics/demo.gif)
+
+---
+
 ## Features
 
 ### Streamlit App (User Interface)
@@ -20,9 +26,20 @@ The project is being extended toward **conversation-level voice phenotyping** fo
   * Formants
   * MFCCs
   * Voice quality (jitter, shimmer, HNR)
+* 🧬 **Genetic Prediction** – Predicts rs11046212 genotype (ABCC9 gene) from voice features
 * Built-in explanations for each metric (UI-friendly)
 * Download results as JSON or CSV
 * History of recent analyses
+
+### 🧬 Genetic Prediction Model
+
+Based on the GWAS study by **Gisladottir et al. (Science Advances, 2023)**:
+
+- **SNP:** rs11046212 in the **ABCC9** gene
+- **Effect:** Each T allele raises voice pitch by ~2.1 Hz (β = 0.114 SD, P = 3×10⁻¹⁸)
+- **Model:** Random Forest classifier trained on synthetic data following Hardy-Weinberg principles
+- **Features used:** pitch_mean, pitch_variability, jitter, shimmer, HNR
+- **Output:** Predicted genotype (CC, CT, or TT) with confidence probabilities
 
 ---
 
@@ -36,6 +53,7 @@ The project is being extended toward **conversation-level voice phenotyping** fo
 * 🔄 Real-time feature extraction
 * 🗣 Dialogue diarization and role-aware analysis
 * 🔐 Backend raw-audio storage by `audio_id`
+* 🧬 Genetic prediction endpoint (`/genetic/predict`)
 
 ---
 
@@ -89,6 +107,39 @@ Open:
 
 * API: [http://localhost:8000](http://localhost:8000)
 * Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+---
+
+## 🧬 Genetic Prediction API
+
+### `POST /genetic/predict`
+
+Predict genotype from voice recording.
+
+**Request:** Multipart form with audio file (WAV, MP3, M4A)
+
+**Response:**
+```json
+{
+    "genotype": "CT",
+    "genotype_code": 1,
+    "probabilities": {
+        "CC": 0.25,
+        "CT": 0.55,
+        "TT": 0.20
+    },
+    "snp": "rs11046212",
+    "gene": "ABCC9",
+    "clinical_note": "Your voice pattern suggests the CT genotype...",
+    "extracted_features": {
+        "pitch_mean": 152.3,
+        "pitch_variability": 0.14,
+        "jitter": 0.72,
+        "shimmer": 0.31,
+        "hnr": 23.5
+    }
+}
+```
 
 ---
 
@@ -167,6 +218,7 @@ docker run -d -p 8000:8000 --name voice-genetics voice-genetics
 | GET    | `/audio/{audio_id}/metadata` | Get stored audio metadata |
 | POST   | `/extract`       | Extract features from one audio file |
 | POST   | `/extract/batch` | Extract features from multiple files |
+| POST   | `/genetic/predict` | Predict genotype from voice (**NEW**) |
 | POST   | `/dialogue/manifest` | Generate `dialogue_manifest.csv` from diarization |
 | POST   | `/dialogue/diarize` | Split a conversation into speech turns |
 | POST   | `/dialogue/analyze` | Analyze a labeled dialogue and extract user features |
@@ -189,6 +241,8 @@ docker run -d -p 8000:8000 --name voice-genetics voice-genetics
 | praat-parselmouth | Phonetic feature extraction |
 | pandas            | Data handling               |
 | soundfile         | Audio I/O                   |
+| scikit-learn      | Genetic prediction model    |
+| joblib            | Model serialization         |
 
 ---
 
@@ -201,10 +255,16 @@ voice-genetics/
 ├── app.py                # FastAPI backend
 ├── audio_processor.py    # Feature extraction logic
 ├── dialogue_processor.py # Dialogue diarization and user-role analysis
+├── genetic_model.py      # Genetic prediction model (Random Forest)
 ├── storage.py            # Backend raw-audio storage abstraction
 ├── config.py             # Configuration
 ├── requirements.txt
-└── Dockerfile
+├── Dockerfile
+├── models/               # Saved trained models
+│   └── genotype_model.pkl
+└── scripts/              # Batch processing utilities
+    ├── analyze_dialogue_dataset.py
+    └── analyze_voice_dataset.py
 ```
 
 ---
@@ -216,6 +276,21 @@ voice-genetics/
 * For best compatibility, Python **3.10–3.11** is recommended
 * Raw audio should not be committed to git; keep it local or store it in secure backend storage
 * The backend storage scheme keeps raw audio under `storage/raw_audio/<audio_id>/` and metadata next to it
+* The genetic model is trained on synthetic data following the GWAS study by Gisladottir et al. (Science Advances, 2023)
+
+---
+
+## 📚 Scientific Reference
+
+**Gisladottir et al., Science Advances 2023**  
+*"Sequence variants affecting voice pitch in humans"*
+
+- N = 12,901 participants
+- GWAS identified ABCC9 variants associated with voice pitch
+- Effect size: 2.1 Hz per T allele
+- P-value: 2.6 × 10⁻¹⁸ (genome-wide significant)
+
+[Read the full article](https://pmc.ncbi.nlm.nih.gov/articles/PMC10256171/)
 
 ---
 

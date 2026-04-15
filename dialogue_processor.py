@@ -16,13 +16,15 @@ from sklearn.preprocessing import normalize
 
 from audio_processor import FeatureExtractionResult, VoiceFeatureExtractor
 
-ASSISTANT_1_ROLE = "assistant_1"
-USER_ROLE = "user"
-ASSISTANT_2_ROLE = "assistant_2"
-MUSIC_ROLE = "music"
+# Standard role labels used throughout the system
+ASSISTANT_1_ROLE = "assistant_1"  # Primary assistant/agent voice
+USER_ROLE = "user"  # Customer/client/user voice
+ASSISTANT_2_ROLE = "assistant_2"  # Secondary assistant voice (if present)
+MUSIC_ROLE = "music"  # Hold music or non-speech audio
 
 LOGGER = logging.getLogger(__name__)
 
+# Aliases for role normalization - maps various input strings to standard roles
 ROLE_ALIASES = {
     "assistant": ASSISTANT_1_ROLE,
     "agent": ASSISTANT_1_ROLE,
@@ -43,6 +45,9 @@ ROLE_ALIASES = {
 
 
 def _normalize_role(value: Optional[str]) -> str:
+    """
+    Convert various role string representations to a canonical role label.
+    """
     if not value:
         return "unknown"
     role = value.strip().lower().replace("-", "_").replace(" ", "_")
@@ -62,6 +67,7 @@ def _normalize_role(value: Optional[str]) -> str:
 
 
 def _is_known_role(role: str) -> bool:
+    """Check if a role string is a valid, known role label."""
     normalized = _normalize_role(role)
     if normalized in {USER_ROLE, MUSIC_ROLE, ASSISTANT_1_ROLE}:
         return True
@@ -72,16 +78,22 @@ def _is_known_role(role: str) -> bool:
 
 
 def _assistant_role_for_index(index: int) -> str:
+    """Generate assistant role name like 'assistant_2', 'assistant_3', etc."""
     return f"assistant_{index}"
 
 
 def _speaker_label(index: Optional[int]) -> Optional[str]:
+    """Generate stable speaker ID like 'speaker_1', 'speaker_2', etc."""
     if index is None:
         return None
     return f"speaker_{index}"
 
 
 def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+    """
+    Compute cosine similarity between two vectors.
+    Used for comparing voice embeddings to match speakers.
+    """
     a = np.asarray(vec_a, dtype=float).ravel()
     b = np.asarray(vec_b, dtype=float).ravel()
     if a.size == 0 or b.size == 0:
@@ -94,21 +106,28 @@ def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
 
 @dataclass
 class DialogueSegmentSpec:
-    segment_id: str
-    start_sec: float
-    end_sec: float
-    analysis_start_sec: Optional[float] = None
-    analysis_end_sec: Optional[float] = None
-    role: Optional[str] = None
-    speaker_id: Optional[str] = None
-    text: Optional[str] = None
-    turn_type: Optional[str] = None
-    is_barge_in: Optional[bool] = None
-    source: str = "manifest"
+    """
+    Specification for a single dialogue segment to analyze.
+
+    This is the input format for the analyze_labeled_dialogue method.
+    Users can edit the manifest CSV and this class parses it back.
+    """
+    segment_id: str  # Unique identifier for this segment
+    start_sec: float  # Start time in seconds
+    end_sec: float  # End time in seconds
+    analysis_start_sec: Optional[float] = None  # Trimmed start (for barge-in removal)
+    analysis_end_sec: Optional[float] = None  # Trimmed end
+    role: Optional[str] = None  # assistant_1, user, assistant_2, music
+    speaker_id: Optional[str] = None  # Stable speaker identifier
+    text: Optional[str] = None  # Optional transcript
+    turn_type: Optional[str] = None  # 'speech', 'music', 'barge_in'
+    is_barge_in: Optional[bool] = None  # Whether this turn interrupts previous
+    source: str = "manifest"  # Source of this segment data
 
 
 @dataclass
 class DialogueTurnResult:
+    """Result of analyzing a single dialogue turn."""
     turn_id: str
     segment_id: Optional[str]
     start_sec: float
@@ -125,39 +144,56 @@ class DialogueTurnResult:
 
 @dataclass
 class DialogueAnalysisResult:
+    """Complete analysis result for a conversation."""
     session_id: str
     source_filename: Optional[str]
     recording_quality: Dict[str, Any]
-    diarization: Dict[str, Any]
-    speaker_summary: Dict[str, Any]
-    user_summary: Dict[str, Any]
-    turns: List[Dict[str, Any]]
+    diarization: Dict[str, Any]  # Speaker clustering and role info
+    speaker_summary: Dict[str, Any]  # Aggregated stats by role/cluster
+    user_summary: Dict[str, Any]  # Aggregated features for user role only
+    turns: List[Dict[str, Any]]  # Individual turn data
     processing_timestamp: str
 
 
 class DialogueProcessor:
-    """Conversation-level processing with diarization and role-aware feature extraction."""
+    """
+    Conversation-level processing with diarization and role-aware feature extraction.
+
+    This class handles the complete pipeline for analyzing multi-speaker conversations:
+    1. Turn detection (energy-based VAD)
+    2. Speaker clustering (agglomerative clustering on voice embeddings)
+    3. Role assignment (assistant_1, user, assistant_N, music)
+    4. Feature extraction (per turn)
+    5. Aggregation (user-only summary for genetic prediction)
+    """
 
     def __init__(self, extractor: VoiceFeatureExtractor):
+        """Initialize with a configured VoiceFeatureExtractor instance."""
         self.extractor = extractor
 
     def _waveform_from_bytes(self, audio_data: bytes, original_filename: Optional[str] = None):
+        """Load audio from bytes and return waveform, sample rate, and Sound object."""
         return self.extractor.load_audio(audio_data, original_filename=original_filename)
 
     def _turn_embedding_dim(self) -> int:
+        """Calculate the dimension of the embedding vector for a speech turn."""
         mfcc_count = int(self.extractor.config.mfcc_number or 12)
+        # MFCC mean + MFCC std + spectral features (10) + pitch features (4)
         return mfcc_count * 2 + 10 + 4
 
     def _validate_time_range(
-        self,
-        start_sec: float,
-        end_sec: float,
-        *,
-        audio_duration_seconds: float,
-        label: str,
-        min_sec: float = 0.0,
-        max_sec: Optional[float] = None,
+            self,
+            start_sec: float,
+            end_sec: float,
+            *,
+            audio_duration_seconds: float,
+            label: str,
+            min_sec: float = 0.0,
+            max_sec: Optional[float] = None,
     ) -> None:
+        """
+        Validate that a time range is within audio bounds.
+        """
         if not np.isfinite(start_sec) or not np.isfinite(end_sec):
             raise ValueError(f"{label} has non-finite time bounds")
         if start_sec < min_sec:
@@ -169,11 +205,17 @@ class DialogueProcessor:
             raise ValueError(f"{label} ends after the audio boundary ({upper_bound:.3f}s)")
 
     def turns_to_manifest_rows(
-        self,
-        turns: Sequence[Dict[str, Any]],
-        *,
-        source_filename: Optional[str] = None,
+            self,
+            turns: Sequence[Dict[str, Any]],
+            *,
+            source_filename: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """
+        Convert diarization turns to rows ready for CSV manifest.
+
+        This creates a DataFrame-friendly structure that users can edit
+        to correct role assignments before re-analysis.
+        """
         rows: List[Dict[str, Any]] = []
         for turn in turns:
             cluster_id = turn.get("speaker_cluster")
@@ -205,11 +247,12 @@ class DialogueProcessor:
         return rows
 
     def turns_to_manifest_csv(
-        self,
-        turns: Sequence[Dict[str, Any]],
-        *,
-        source_filename: Optional[str] = None,
+            self,
+            turns: Sequence[Dict[str, Any]],
+            *,
+            source_filename: Optional[str] = None,
     ) -> str:
+        """Generate CSV string from diarization turns for download."""
         rows = self.turns_to_manifest_rows(
             turns,
             source_filename=source_filename,
@@ -238,7 +281,16 @@ class DialogueProcessor:
         return buffer.getvalue()
 
     def _turn_embedding(self, y: np.ndarray, sr: int) -> np.ndarray:
-        """Build a compact embedding for clustering speech turns."""
+        """
+        Build a compact embedding vector for a speech turn.
+
+        The embedding combines:
+        - MFCCs (mean and std) for spectral characteristics
+        - Spectral features (centroid, bandwidth, rolloff, ZCR, RMS)
+        - Pitch features (mean, min, max, variability)
+
+        These embeddings are used for speaker clustering via cosine similarity.
+        """
         mfcc_count = int(self.extractor.config.mfcc_number or 12)
         embedding_dim = self._turn_embedding_dim()
         if len(y) == 0:
@@ -247,6 +299,7 @@ class DialogueProcessor:
         feature_blocks: List[float] = []
 
         def extend_stats(values: np.ndarray) -> None:
+            """Add mean and std of a 1D array to feature blocks."""
             arr = np.asarray(values, dtype=float).ravel()
             if arr.size == 0:
                 feature_blocks.extend([0.0, 0.0])
@@ -254,12 +307,14 @@ class DialogueProcessor:
                 feature_blocks.extend([float(np.mean(arr)), float(np.std(arr))])
 
         def extend_vector(values: np.ndarray) -> None:
+            """Add all values of a 1D array to feature blocks."""
             arr = np.asarray(values, dtype=float).ravel()
             if arr.size == 0:
                 feature_blocks.extend([0.0] * mfcc_count)
             else:
                 feature_blocks.extend(arr.tolist())
 
+        # Extract MFCC features (spectral envelope)
         try:
             mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=mfcc_count)
             extend_vector(mfcc.mean(axis=1))
@@ -268,6 +323,7 @@ class DialogueProcessor:
             LOGGER.debug("MFCC extraction failed for turn embedding: %s", exc, exc_info=True)
             feature_blocks.extend([0.0] * (mfcc_count * 2))
 
+        # Extract spectral features (timbre characteristics)
         try:
             extend_stats(librosa.feature.spectral_centroid(y=y, sr=sr))
             extend_stats(librosa.feature.spectral_bandwidth(y=y, sr=sr))
@@ -278,6 +334,7 @@ class DialogueProcessor:
             LOGGER.debug("Spectral feature extraction failed for turn embedding: %s", exc, exc_info=True)
             feature_blocks.extend([0.0] * 10)
 
+        # Extract pitch features (fundamental frequency)
         try:
             pitch_features = self.extractor.extract_pitch_features(parselmouth.Sound(y, sr))
         except Exception as exc:
@@ -299,11 +356,12 @@ class DialogueProcessor:
         return np.asarray(feature_blocks, dtype=float)
 
     def _turn_embeddings(
-        self,
-        y: np.ndarray,
-        sr: int,
-        turns: Sequence[Dict[str, Any]],
+            self,
+            y: np.ndarray,
+            sr: int,
+            turns: Sequence[Dict[str, Any]],
     ) -> List[np.ndarray]:
+        """Generate embeddings for all turns in a conversation."""
         embeddings: List[np.ndarray] = []
         for turn in turns:
             turn_audio = self._segment_waveform(y, sr, turn["start_sec"], turn["end_sec"])
@@ -314,9 +372,11 @@ class DialogueProcessor:
         return embeddings
 
     def _segment_waveform(self, y: np.ndarray, sr: int, start_sec: float, end_sec: float) -> np.ndarray:
+        """Extract a time-bounded slice of the waveform."""
         return self.extractor.slice_waveform(y, sr, start_sec, end_sec)
 
     def _flatten_feature_result(self, result: FeatureExtractionResult) -> Dict[str, Any]:
+        """Convert FeatureExtractionResult to a flat dictionary for aggregation."""
         recording_quality = result.recording_quality
         features = result.features
         pitch = features.get("pitch", {})
@@ -343,15 +403,23 @@ class DialogueProcessor:
             "harmonic_to_noise_ratio": voice_quality.get("harmonic_to_noise_ratio"),
         }
 
+        # Add formants (F1, F2, etc.)
         for key, value in timbre.get("formants", {}).items():
             flat[key] = value
 
+        # Add MFCC coefficients
         for idx, value in enumerate(timbre.get("mfccs", []), start=1):
             flat[f"mfcc_{idx}"] = value
 
         return flat
 
     def _aggregate_rows(self, rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Aggregate numeric features across multiple rows.
+
+        Computes mean, std, min, max, and count for each numeric field.
+        This is used to create summary statistics for user segments.
+        """
         numeric_buckets: Dict[str, List[float]] = defaultdict(list)
 
         for row in rows:
@@ -378,6 +446,13 @@ class DialogueProcessor:
         }
 
     def _speaker_summary(self, turn_rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Generate summary statistics grouped by role, cluster, and speaker identity.
+
+        Returns:
+            Dictionary with 'by_role', 'by_cluster', and 'by_identity' summaries
+            each containing segment count and duration statistics.
+        """
         by_role: Dict[str, Dict[str, Any]] = {}
         by_cluster: Dict[str, Dict[str, Any]] = {}
         by_identity: Dict[str, Dict[str, Any]] = {}
@@ -425,7 +500,7 @@ class DialogueProcessor:
         return {"by_role": by_role, "by_cluster": by_cluster, "by_identity": by_identity}
 
     def _detect_speech_turns(self, y: np.ndarray, sr: int) -> List[Dict[str, Any]]:
-        """Detect speech turns using energy-based VAD as a local baseline."""
+        """Detect speech turns using energy-based Voice Activity Detection (VAD)."""
         intervals = librosa.effects.split(y, top_db=self.extractor.config.vad_top_db)
         if len(intervals) == 0:
             return []
@@ -433,6 +508,7 @@ class DialogueProcessor:
         min_turn_samples = int(self.extractor.config.min_turn_duration_seconds * sr)
         merge_gap_samples = int(self.extractor.config.merge_gap_seconds * sr)
 
+        # Merge intervals that are close together
         merged: List[List[int]] = []
         for start, end in intervals:
             if not merged:
@@ -443,6 +519,7 @@ class DialogueProcessor:
             else:
                 merged.append([int(start), int(end)])
 
+        # Convert to turn objects, filtering short segments
         turns: List[Dict[str, Any]] = []
         for idx, (start, end) in enumerate(merged, start=1):
             if end - start < min_turn_samples:
@@ -461,14 +538,20 @@ class DialogueProcessor:
         return turns
 
     def _cluster_turns(self, y: np.ndarray, sr: int, turns: Sequence[Dict[str, Any]]) -> List[int]:
-        """Cluster speech turns into speaker groups."""
+        """
+        Cluster speech turns into speaker groups using agglomerative clustering.
+
+        Returns a list of cluster labels (integers) for each turn.
+        """
         if len(turns) <= 1:
             return [0] * len(turns)
 
+        # Generate embeddings and normalize
         embeddings = self._turn_embeddings(y, sr, turns)
         matrix = np.vstack(embeddings)
         matrix = normalize(matrix, norm="l2")
 
+        # Configure clustering parameters
         max_speakers = max(2, int(self.extractor.config.max_dialogue_speakers or len(turns)))
         threshold = float(self.extractor.config.dialogue_cluster_distance_threshold or 0.04)
         min_threshold = 0.01
@@ -487,6 +570,7 @@ class DialogueProcessor:
         labels = fit_clusters(threshold)
         cluster_count = len(set(labels.tolist()))
 
+        # Adjust threshold to get desired number of speakers
         if cluster_count > max_speakers:
             current_threshold = threshold
             while cluster_count > max_speakers and current_threshold < max_threshold:
@@ -504,14 +588,22 @@ class DialogueProcessor:
         return labels.tolist()
 
     def _is_music_like(
-        self,
-        y: np.ndarray,
-        sr: int,
-        *,
-        gap_before_seconds: float = 0.0,
-        gap_after_seconds: float = 0.0,
+            self,
+            y: np.ndarray,
+            sr: int,
+            *,
+            gap_before_seconds: float = 0.0,
+            gap_after_seconds: float = 0.0,
     ) -> bool:
-        """Conservative heuristic for hold music / non-speech segments."""
+        """
+        Conservative heuristic to detect hold music / non-speech segments.
+
+        Uses multiple features:
+        - Spectral flatness (music is flatter than speech)
+        - Beat tracking (music has regular beats)
+        - Pitch variability (speech varies more than music)
+        - Duration and gap context (music usually longer with gaps)
+        """
         if len(y) == 0 or sr <= 0:
             return False
 
@@ -531,12 +623,14 @@ class DialogueProcessor:
         tempo = 0.0
         pitch_variability = 1.0
 
+        # Spectral flatness - music is typically flatter (more noise-like spectrum)
         try:
             flatness_score = float(np.mean(librosa.feature.spectral_flatness(y=y)))
         except Exception as exc:
             LOGGER.debug("Spectral flatness failed for music heuristic: %s", exc, exc_info=True)
             flatness_score = 1.0
 
+        # Beat tracking - music has regular, detectable beats
         try:
             onset_env = librosa.onset.onset_strength(y=y, sr=sr)
             tempo, beat_frames = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
@@ -552,6 +646,7 @@ class DialogueProcessor:
             beat_count = 0
             beat_regularity = float("inf")
 
+        # Pitch variability - music has less pitch variation than speech
         try:
             pitch_features = self.extractor.extract_pitch_features(parselmouth.Sound(y, sr))
             pitch_variability = float(pitch_features.variability or 0.0)
@@ -559,6 +654,7 @@ class DialogueProcessor:
             LOGGER.debug("Pitch extraction failed for music heuristic: %s", exc, exc_info=True)
             pitch_variability = 1.0
 
+        # Quick rejection for clear non-music
         if flatness_score > 0.18:
             return False
         if beat_count < 6:
@@ -570,6 +666,7 @@ class DialogueProcessor:
         if pitch_variability > 0.12:
             return False
 
+        # Score-based classification
         music_score = 0
         if flatness_score < 0.15:
             music_score += 1
@@ -584,22 +681,17 @@ class DialogueProcessor:
 
     def _assign_diarization_roles(self, y: np.ndarray, sr: int, turn_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Assign semantic roles to diarized turns.
+        Assign semantic roles (assistant_1, user, assistant_N, music) to diarized turns.
 
-        We anchor the dialogue on speaker similarity:
-        - the first turn seeds assistant_1
-        - the second turn seeds user
-        - later turns are matched against those voice profiles
-        - if a new speech voice is not similar enough to any known profile,
-          it becomes assistant_2, assistant_3, ...
-        - hold music is only used as a fallback when the segment is both
-          music-like and dissimilar to the speech profiles
+        Role assignment logic:
+        1. First turn seeds assistant_1 voice profile
+        2. Second turn seeds user voice profile
+        3. Subsequent turns matched against existing profiles via cosine similarity
+        4. If similarity high enough, assign matching role
+        5. If music-like and dissimilar, assign music role
+        6. Otherwise, create new assistant_N role
 
-        `speaker_id` is a stable canonical voice label:
-        - `speaker_1` for assistant_1
-        - `speaker_2` for user
-        - `speaker_3+` for additional assistants
-        - `music_1` for hold music
+        Returns mapping from clusters to roles and speaker IDs.
         """
         if not turn_rows:
             return {
@@ -625,6 +717,7 @@ class DialogueProcessor:
         speaker_role_votes: Dict[str, List[str]] = defaultdict(list)
         role_to_cluster: Dict[str, Optional[int]] = {}
 
+        # Centroids for each role's voice profile
         role_centroids: Dict[str, np.ndarray] = {}
         role_counts: Dict[str, int] = defaultdict(int)
         role_to_speaker_id: Dict[str, str] = {}
@@ -636,6 +729,7 @@ class DialogueProcessor:
         music_similarity_threshold = float(self.extractor.config.music_role_similarity_threshold or 0.62)
 
         def get_role_speaker_id(role: str) -> str:
+            """Generate stable speaker ID for a role (speaker_1, speaker_2, music_1)."""
             nonlocal next_speaker_index
             if role not in role_to_speaker_id:
                 if role == MUSIC_ROLE:
@@ -646,6 +740,7 @@ class DialogueProcessor:
             return role_to_speaker_id[role]
 
         def update_centroid(role: str, embedding: np.ndarray) -> None:
+            """Update running centroid for a role with new embedding."""
             if role not in role_centroids:
                 role_centroids[role] = embedding.astype(float)
                 role_counts[role] = 1
@@ -655,6 +750,7 @@ class DialogueProcessor:
             role_counts[role] = count + 1
 
         def majority_vote(values: Sequence[str]) -> Optional[str]:
+            """Return most common value, breaking ties by first occurrence."""
             if not values:
                 return None
             counts: Dict[str, int] = defaultdict(int)
@@ -665,7 +761,7 @@ class DialogueProcessor:
             ordered = sorted(counts.items(), key=lambda item: (-item[1], first_index[item[0]]))
             return ordered[0][0] if ordered else None
 
-        # Seed the canonical speaker profiles from the first two turns.
+        # Seed voice profiles from first two turns
         seed_roles = [ASSISTANT_1_ROLE]
         if len(turn_rows) > 1:
             seed_roles.append(USER_ROLE)
@@ -673,12 +769,14 @@ class DialogueProcessor:
         for index, role in enumerate(seed_roles):
             update_centroid(role, embeddings[index])
 
+        # Assign roles to all turns
         for index, row in enumerate(turn_rows):
             cluster_id_raw = row.get("speaker_cluster")
             cluster_id = int(cluster_id_raw) if cluster_id_raw is not None else None
             start_sec = float(row.get("start_sec", 0.0))
             end_sec = float(row.get("end_sec", start_sec))
 
+            # Calculate gaps to previous/next turns
             gap_before = 0.0
             gap_after = 0.0
             if index > 0:
@@ -696,6 +794,7 @@ class DialogueProcessor:
                 gap_after_seconds=gap_after,
             )
 
+            # Role assignment logic
             if index == 0:
                 role = ASSISTANT_1_ROLE
             elif index == 1:
@@ -705,6 +804,7 @@ class DialogueProcessor:
                 best_role = None
                 best_similarity = -1.0
 
+                # Find closest matching existing role
                 for candidate_role, centroid in role_centroids.items():
                     if centroid is None:
                         continue
@@ -723,13 +823,15 @@ class DialogueProcessor:
 
                 update_centroid(role, embedding)
 
+            # Update row with assigned role and metadata
             speaker_id = get_role_speaker_id(role)
             row["role"] = role
             row["speaker_id"] = speaker_id
             row["gap_before_seconds"] = gap_before
             row["gap_after_seconds"] = gap_after
             row["turn_type"] = "music" if role == MUSIC_ROLE else "speech"
-            row["is_barge_in"] = index > 0 and row["role"] == USER_ROLE and gap_before <= float(self.extractor.config.barge_in_gap_seconds or 0.35)
+            row["is_barge_in"] = index > 0 and row["role"] == USER_ROLE and gap_before <= float(
+                self.extractor.config.barge_in_gap_seconds or 0.35)
             row["analysis_start_sec"] = (
                 min(end_sec, start_sec + float(self.extractor.config.barge_in_trim_seconds or 0.0))
                 if row["is_barge_in"]
@@ -737,6 +839,7 @@ class DialogueProcessor:
             )
             row["analysis_end_sec"] = end_sec
 
+            # Track clusters by role
             if role.startswith("assistant_") and role not in assistant_roles:
                 assistant_roles.append(role)
             if role.startswith("assistant_") and cluster_id is not None and cluster_id not in assistant_clusters:
@@ -751,6 +854,7 @@ class DialogueProcessor:
             if cluster_id is not None:
                 role_to_cluster.setdefault(role, cluster_id)
 
+        # Post-process: resolve cluster to role mappings via majority vote
         distinct_speaker_count = len(
             {
                 row.get("speaker_cluster")
@@ -797,13 +901,18 @@ class DialogueProcessor:
         }
 
     def diarize_dialogue(
-        self,
-        audio_data: bytes,
-        session_id: str,
-        *,
-        original_filename: Optional[str] = None,
+            self,
+            audio_data: bytes,
+            session_id: str,
+            *,
+            original_filename: Optional[str] = None,
     ) -> DialogueAnalysisResult:
-        """Return speech turns, speaker clusters, and semantic role labels."""
+        """
+        Main entry point for conversation diarization.
+
+        Returns speech turns, speaker clusters, and semantic role labels.
+        This is the first step in the dialogue analysis pipeline.
+        """
         y, sr, _ = self._waveform_from_bytes(audio_data, original_filename=original_filename)
         recording_quality = self.extractor.extract_waveform_features(
             y,
@@ -871,15 +980,21 @@ class DialogueProcessor:
         )
 
     def analyze_labeled_dialogue(
-        self,
-        audio_data: bytes,
-        session_id: str,
-        segments: Sequence[DialogueSegmentSpec],
-        *,
-        original_filename: Optional[str] = None,
-        strict_roles: bool = True,
+            self,
+            audio_data: bytes,
+            session_id: str,
+            segments: Sequence[DialogueSegmentSpec],
+            *,
+            original_filename: Optional[str] = None,
+            strict_roles: bool = True,
     ) -> DialogueAnalysisResult:
-        """Extract features for labelled dialogue segments and aggregate user-only vectors."""
+        """
+        Extract features for labelled dialogue segments and aggregate user-only vectors.
+
+        This is the second step after users edit the manifest.
+        It extracts voice features only for segments marked as 'user'
+        and aggregates them for genetic prediction.
+        """
         y, sr, _ = self._waveform_from_bytes(audio_data, original_filename=original_filename)
         audio_duration_seconds = len(y) / sr if sr > 0 else 0.0
         recording_quality = self.extractor.extract_waveform_features(
@@ -954,6 +1069,7 @@ class DialogueProcessor:
                 }
             )
 
+            # Only collect user segments for genetic prediction
             if role == USER_ROLE:
                 user_rows.append(flat)
 
